@@ -138,6 +138,14 @@ namespace Aurie
 			potential_loaded_copy
 		);
 
+		DbgPrintEx(
+			LOG_SEVERITY_TRACE,
+			"MdpLookupModuleByPath(%S) returns %p (%s)",
+			ImagePath.wstring().c_str(), 
+			potential_loaded_copy, 
+			AurieStatusToString(last_status)
+		);
+
 		// If there's a module that's already loaded from the same path, deny loading it twice
 		if (AurieSuccess(last_status))
 			return AURIE_OBJECT_ALREADY_EXISTS;
@@ -304,6 +312,7 @@ namespace Aurie
 		uintptr_t module_init_offset = PpFindFileExportByName(ImagePath, "ModuleInitialize");
 
 		uintptr_t module_callback_offset = PpFindFileExportByName(ImagePath, "ModuleOperationCallback");
+		uintptr_t module_entrypoint_offset = PpFindFileExportByName(ImagePath, "ModuleEntrypoint");
 		uintptr_t module_preload_offset = PpFindFileExportByName(ImagePath, "ModulePreinitialize");
 		uintptr_t module_unload_offset = PpFindFileExportByName(ImagePath, "ModuleUnload");
 
@@ -313,8 +322,18 @@ namespace Aurie
 		AurieEntry module_init = reinterpret_cast<AurieEntry>(image_base + module_init_offset);
 		AurieEntry module_preload = reinterpret_cast<AurieEntry>(image_base + module_preload_offset);
 		AurieEntry module_unload = reinterpret_cast<AurieEntry>(image_base + module_unload_offset);
+		AurieEntry module_entrypoint = reinterpret_cast<AurieEntry>(image_base + module_entrypoint_offset);
 		AurieLoaderEntry framework_init = reinterpret_cast<AurieLoaderEntry>(image_base + framework_init_offset);
 		AurieModuleCallback module_callback = reinterpret_cast<AurieModuleCallback>(image_base + module_callback_offset);
+
+		DbgPrintEx(LOG_SEVERITY_TRACE, "MdpProcessImageExports '%S'", ImagePath.wstring().c_str());
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- __AurieFrameworkInit offset: %" PRIXPTR, framework_init_offset);
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- ModuleInitialize offset: %" PRIXPTR, module_init_offset);
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- ModuleOperationCallback offset: %" PRIXPTR, module_callback_offset);
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- ModuleEntrypoint offset: %" PRIXPTR, module_entrypoint_offset);
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- ModulePreinitialize offset: %" PRIXPTR, module_preload_offset);
+		DbgPrintEx(LOG_SEVERITY_TRACE, "- ModuleUnload offset: %" PRIXPTR, module_unload_offset);
+
 
 		// If the offsets are zero, the function wasn't found, which means we shouldn't populate the field.
 		if (module_init_offset)
@@ -332,9 +351,37 @@ namespace Aurie
 		if (module_unload_offset)
 			ModuleImage->ModuleUnload = module_unload;
 
+		if (module_entrypoint_offset)
+			ModuleImage->ModuleEntrypoint = module_entrypoint;
+
 		// We always need __AurieFrameworkInit to exist.
-		// We also need either a ModuleInitialize or a ModulePreinitialize function.
-		return ((module_init_offset || module_preload_offset) && framework_init_offset) ? AURIE_SUCCESS : AURIE_FILE_PART_NOT_FOUND;
+		// We also need either a ModuleInitialize or a ModulePreinitialize or a ModuleEntrypoint function.
+		return ((module_init_offset || module_preload_offset || module_entrypoint_offset) && framework_init_offset)
+			? AURIE_SUCCESS : AURIE_FILE_PART_NOT_FOUND;
+	}
+
+	bool Internal::MdpIsCurrentBuildDebug()
+	{
+#ifdef NDEBUG
+		return false;
+#else
+		return true;
+#endif
+	}
+
+	AurieStatus Internal::MdpVerifyModuleBuild(
+		IN HMODULE ImageBaseAddress
+	)
+	{
+		// Try to get the __AurieIsDebugBuild function. Defined and exported by SH >= v2.0.0
+		using FN_IsDebugBuild = bool(*)();
+		auto is_module_debug_build = reinterpret_cast<FN_IsDebugBuild>(GetProcAddress(ImageBaseAddress, "__AurieIsDebugBuild"));
+
+		// If unavailable, return.
+		if (!is_module_debug_build)
+			return AURIE_NOT_IMPLEMENTED;
+
+		return (MdpIsCurrentBuildDebug() == is_module_debug_build()) ? AURIE_SUCCESS : AURIE_VERIFICATION_FAILURE;
 	}
 
 	// The ignoring of return values here is on purpose, we just have to power through
@@ -407,6 +454,32 @@ namespace Aurie
 		if (Module == g_ArInitialImage)
 			return AURIE_SUCCESS;
 
+		// Ignore dispatch attempts for null functions
+		// 
+		// Note that while MmpVerifyCallback does check for this,
+		// I don't actually want a print to happen.
+		//
+		// This prevents crashes when unloading, as printing from ArDetachProcess context is forbidden.
+		if (Entry == nullptr)
+			return AURIE_SUCCESS;
+
+		// Ignore invalid functions 
+		if (!AurieSuccess(MmpVerifyCallback(Module, Entry)))
+		{
+			std::wstring module_name;
+			MdGetImageFilename(Module, module_name);
+
+			DbgPrintEx(
+				LOG_SEVERITY_ERROR,
+				"Callback verification failed for module '%S' at %p (method %p)",
+				module_name.c_str(),
+				MdpGetModuleBaseAddress(Module),
+				Entry
+			);
+
+			return AURIE_SUCCESS;
+		}
+
 		ObpDispatchModuleOperationCallbacks(
 			Module, 
 			Entry, 
@@ -442,22 +515,7 @@ namespace Aurie
 		MdpBuildModuleList(
 			Folder,
 			Recursive,
-			[](const fs::directory_entry& entry) -> bool
-			{
-				if (!entry.is_regular_file())
-					return false;
-
-				if (!entry.path().has_filename())
-					return false;
-
-				if (!entry.path().filename().has_extension())
-					return false;
-
-				if (entry.path().filename().extension().compare(L".dll"))
-					return false;
-
-				return true;
-			},
+			MdpIsValidModulePredicate,
 			modules_to_map
 		);
 
@@ -477,6 +535,65 @@ namespace Aurie
 
 		if (NumberOfMappedModules)
 			*NumberOfMappedModules = loaded_count;
+	}
+
+	AurieStatus Internal::MdpMapModulesFromList(
+		IN const std::vector<fs::path>& ModuleList
+	)
+	{
+		AurieStatus last_status = AURIE_SUCCESS;
+
+		// Determine if we're doing a runtime load.
+		// Runtime loads are done when the process is no longer suspended.
+		bool is_process_suspended = false;
+		last_status = ElIsProcessSuspended(is_process_suspended);
+		
+		if (!AurieSuccess(last_status))
+			return last_status;
+
+		// Loop over all the modules
+		for (auto path : ModuleList)
+		{
+			// Map the image.
+			AurieModule* module = nullptr;
+			last_status = MdMapImageEx(
+				path,
+				!is_process_suspended,
+				module
+			);
+
+			// If not successful, we log an error, but don't end iteration.
+			if (!AurieSuccess(last_status))
+			{
+				DbgPrintEx(
+					LOG_SEVERITY_ERROR, 
+					"Cannot load module '%S' (%s)", 
+					path.native().c_str(),
+					AurieStatusToString(last_status)
+				);
+			}
+		}
+
+		return AURIE_SUCCESS;
+	}
+
+	bool Internal::MdpIsValidModulePredicate(
+		IN const fs::directory_entry& Entry
+	)
+	{
+		if (!Entry.is_regular_file())
+			return false;
+
+		if (!Entry.path().has_filename())
+			return false;
+	
+		if (!Entry.path().filename().has_extension())
+			return false;
+
+		if (Entry.path().filename().extension().compare(L".dll"))
+			return false;
+
+		return true;
 	}
 
 	AurieStatus MdMapImage(
@@ -502,6 +619,13 @@ namespace Aurie
 
 		// Map the image
 		last_status = Internal::MdpMapImage(ImagePath, image_base);
+		DbgPrintEx(
+			LOG_SEVERITY_TRACE, 
+			"[MdMapImageEx] MdpMapImage(%S) returns %s (GLE 0x%x)", 
+			ImagePath.filename().c_str(),
+			AurieStatusToString(last_status),
+			GetLastError()
+		);
 
 		if (!AurieSuccess(last_status))
 			return last_status;
@@ -517,11 +641,45 @@ namespace Aurie
 		);
 
 		// Verify image integrity
-		last_status = Internal::MmpVerifyCallback(module_object.ImageBase.Module, module_object.FrameworkInitialize);
+		last_status = Internal::MmpVerifyCallback(&module_object, module_object.FrameworkInitialize);
 		if (!AurieSuccess(last_status))
 			return last_status;
 
 		module_object.Flags.IsRuntimeLoaded = IsRuntimeLoad;
+
+		// Verify module build configuration
+		last_status = Internal::MdpVerifyModuleBuild(image_base);
+
+		if (!AurieSuccess(last_status))
+		{
+			// Hope it succeeds - worst case, we print an empty string.
+			std::wstring module_name;
+			MdGetImageFilename(
+				&module_object,
+				module_name
+			);
+
+			// AURIE_NOT_IMPLEMENTED means that the module doesn't export an __AurieIsDebugBuild function.
+			// For preserving backwards compat, we don't hard-reject that.
+			if (last_status != AURIE_NOT_IMPLEMENTED)
+			{
+				DbgPrintEx(
+					LOG_SEVERITY_CRITICAL,
+					"Module '%S' was built using wrong configuration! Use '%s' when targeting this build of Aurie.",
+					module_name.c_str(),
+					Internal::MdpIsCurrentBuildDebug() ? "Debug" : "Release"
+				);
+
+				return last_status;
+			}
+
+			DbgPrintEx(
+				LOG_SEVERITY_WARNING,
+				"Module '%S' compiler configuration could not be verified. Assuming '%s'.",
+				module_name.c_str(),
+				Internal::MdpIsCurrentBuildDebug() ? "Debug" : "Release"
+			);
+		}
 
 		// Add the module to the module list before running module code
 		// No longer safe to access module_object

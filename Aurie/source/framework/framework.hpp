@@ -16,6 +16,7 @@
 #define WIN32_NO_STATUS
 #include <Windows.h>
 #include <winternl.h>
+#include <cinttypes>
 #include <list>
 #include <map>
 #include <SafetyHook/safetyhook.hpp>
@@ -83,6 +84,14 @@ namespace Aurie
 				// If this bit is set, the module was loaded by a MdMapImage call from another module.
 				// This makes it such that its ModulePreload function never gets called.
 				bool IsRuntimeLoaded : 1;
+
+				// If this bit is set, the module's Entrypoint function has been called.
+				// This call to Entrypoint happens before the call to Preload.
+				//
+				// If the Aurie Framework is injected into a running process, this function is called
+				// right before the call to Initialize.
+				// Otherwise, this function is guaranteed to run before the main process's entrypoint.
+				bool EntrypointRan : 1;
 			};
 		} Flags;
 
@@ -116,6 +125,10 @@ namespace Aurie
 		// An unload routine for the module
 		AurieEntry ModuleUnload;
 
+		// The optional entrypoint routine for the module
+		// Called prior to ModulePreinitialize
+		AurieEntry ModuleEntrypoint;
+
 		// The __AurieFrameworkInit function
 		AurieLoaderEntry FrameworkInitialize;
 
@@ -131,6 +144,7 @@ namespace Aurie
 		// Functions hooked by the module by Mm*Hook functions
 		std::list<AurieInlineHook> InlineHooks;
 		std::list<AurieMidHook> MidHooks;
+		std::list<AurieRpHook> RPInlineHooks;
 
 		// If set, notifies the plugin of any module actions
 		AurieModuleCallback ModuleOperationCallback;
@@ -159,6 +173,7 @@ namespace Aurie
 			this->ModuleUnload = nullptr;
 			this->FrameworkInitialize = nullptr;
 			this->ModuleOperationCallback = nullptr;
+			this->ModuleEntrypoint = nullptr;
 		}
 	};
 
@@ -197,6 +212,25 @@ namespace Aurie
 		virtual AurieObjectType GetObjectType() override
 		{
 			return AURIE_OBJECT_MIDFUNCTION_HOOK;
+		}
+	};
+
+	struct AurieRpHook : AurieObject
+	{
+		AurieModule* Owner = nullptr;
+		std::string Identifier;
+		SafetyHookRp HookInstance;
+
+		bool operator==(const AurieRpHook& Other) const
+		{
+			return
+				this->HookInstance.destination() == Other.HookInstance.destination() &&
+				this->HookInstance.target() == Other.HookInstance.target();
+		}
+
+		virtual AurieObjectType GetObjectType() override
+		{
+			return AURIE_OBJECT_RP_HOOK;
 		}
 	};
 
@@ -318,6 +352,7 @@ namespace Aurie
 	} SYSTEM_PROCESS_INFORMATION, *PSYSTEM_PROCESS_INFORMATION;
 }
 
+#include "Debugging/debug.hpp"
 #include "Early Launch/early_launch.hpp"
 #include "Memory Manager/memory.hpp"
 #include "Module Manager/module.hpp"

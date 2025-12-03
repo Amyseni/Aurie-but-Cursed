@@ -2,39 +2,12 @@
 
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
-    <TargetFramework>net7.0-windows</TargetFramework>
-    <ApplicationManifest>app.manifest</ApplicationManifest>
-    <ApplicationIcon>aurie-icon.ico</ApplicationIcon>
+    <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
+    <UseWindowsForms>true</UseWindowsForms>
     <ImplicitUsings>enable</ImplicitUsings>
-    <UseWPF>true</UseWPF>
-	<IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
-	<IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
-	<AssemblyName>AurieManager</AssemblyName>
-	<RootNamespace>AurieManager</RootNamespace>
-	<Title>AurieManager</Title>
-	<AssemblyVersion>1.0.2.7</AssemblyVersion>
-	<FileVersion>1.0.2.7</FileVersion>
+    <ForceDesignerDpiUnaware>true</ForceDesignerDpiUnaware>
+    <ApplicationHighDpiMode>DpiUnaware</ApplicationHighDpiMode>
   </PropertyGroup>
-
-  <ItemGroup>
-    <Content Include="aurie-icon.ico" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <PackageReference Include="WPF-UI" Version="3.0.0-preview.11" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="7.0.1 " />
-    <PackageReference Include="CommunityToolkit.Mvvm" Version="8.2.1 " />
-  </ItemGroup>
-
-  <ItemGroup>
-    <None Remove="Assets\aurie-icon-256.png" />
-    <None Remove="Assets\aurie-icon-1024.png" />
-  </ItemGroup>
-
-  <ItemGroup>
-    <Resource Include="Assets\aurie-icon-256.png" />
-    <Resource Include="Assets\aurie-icon-1024.png" />
-  </ItemGroup>
 
 </Project>

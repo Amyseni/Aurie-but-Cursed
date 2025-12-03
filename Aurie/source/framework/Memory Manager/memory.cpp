@@ -134,6 +134,85 @@ namespace Aurie
 		Internal::MmpFreezeCurrentProcess();
 
 		// Creates and enables the actual hook
+		AurieRpHook* created_hook = Internal::MmpCreateRpHook(
+			Module,
+			HookIdentifier,
+			SourceFunction,
+			DestinationFunction
+		);
+
+		if (!created_hook)
+		{
+			Internal::MmpResumeCurrentProcess();
+			return AURIE_INSUFFICIENT_MEMORY;
+		}
+
+		// If the hook is invalid, we're probably passing invalid parameters to it.
+		if (!created_hook->HookInstance)
+		{
+			Internal::MmpResumeCurrentProcess();
+			return AURIE_INVALID_PARAMETER;
+		}
+
+		if (Trampoline)
+			*Trampoline = created_hook->HookInstance.original<PVOID>();
+
+		Internal::MmpResumeCurrentProcess();
+		return AURIE_SUCCESS;
+	}
+
+	AurieStatus MmEnableHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier
+	)
+	{
+		return Internal::MmpEnableHook(Module, HookIdentifier);
+	}
+
+	AurieStatus MmDisableHook(
+		IN AurieModule* Module, 
+		IN std::string_view HookIdentifier
+	)
+	{
+		return Internal::MmpDisableHook(Module, HookIdentifier);
+	}
+
+	AurieStatus MmGetRegistersForHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier, 
+		OUT ProcessorContext& Context
+	)
+	{
+		AurieStatus last_status = AURIE_SUCCESS;
+		AurieRpHook* rp_hook_object = nullptr;
+
+		last_status = Internal::MmpLookupRPHookByName(
+			Module,
+			HookIdentifier,
+			rp_hook_object
+		);
+
+		// If no hook exists or this otherwise errors, we return that.
+		if (!AurieSuccess(last_status))
+			return last_status;
+
+		return Internal::MmpGetRegistersForRPHook(rp_hook_object, Context);
+	}
+
+	AurieStatus MmCreateUnsafeHook(
+		IN AurieModule* Module, 
+		IN std::string_view HookIdentifier,
+		IN PVOID SourceFunction,
+		IN PVOID DestinationFunction,
+		OUT OPTIONAL PVOID* Trampoline
+	)
+	{
+		if (AurieSuccess(MmHookExists(Module, HookIdentifier)))
+			return AURIE_OBJECT_ALREADY_EXISTS;
+
+		Internal::MmpFreezeCurrentProcess();
+
+		// Creates and enables the actual hook
 		AurieInlineHook* created_hook = Internal::MmpCreateInlineHook(
 			Module,
 			HookIdentifier,
@@ -168,6 +247,8 @@ namespace Aurie
 	{
 		AurieInlineHook* inline_hook_object = nullptr;
 		AurieMidHook* mid_hook_object = nullptr;
+		AurieRpHook* rp_hook_object = nullptr;
+
 
 		AurieStatus last_status = AURIE_SUCCESS;
 
@@ -183,6 +264,15 @@ namespace Aurie
 				Module,
 				HookIdentifier,
 				mid_hook_object
+			);
+		}
+
+		if (!AurieSuccess(last_status))
+		{
+			last_status = Internal::MmpLookupRPHookByName(
+				Module,
+				HookIdentifier,
+				rp_hook_object
 			);
 		}
 
@@ -209,17 +299,36 @@ namespace Aurie
 	)
 	{
 		AurieInlineHook* hook_object = nullptr;
+		AurieRpHook* rp_hook_object = nullptr;
+		AurieStatus last_status = AURIE_SUCCESS;
 
-		AurieStatus last_status = Internal::MmpLookupInlineHookByName(
+		// Try to look up an inline "unsafe" hook first.
+		last_status = Internal::MmpLookupInlineHookByName(
 			Module,
 			HookIdentifier,
 			hook_object
 		);
 
+		// If we didn't succeed, it may be a RP hook we're looking for
+		if (!AurieSuccess(last_status))
+		{
+			last_status = Internal::MmpLookupRPHookByName(
+				Module,
+				HookIdentifier,
+				rp_hook_object
+			);
+		}
+
+		// If neither succeeded, we return nullptr.
 		if (!AurieSuccess(last_status))
 			return nullptr;
 
-		return hook_object->HookInstance.original<PVOID>();
+		// Otherwise we just return what is not null.
+		// If hook_object is null, then rp_hook_object isn't.
+		if (hook_object)
+			return hook_object->HookInstance.original<PVOID>();
+
+		return rp_hook_object->HookInstance.original<PVOID>();
 	}
 
 	EXPORTED void MmGetFrameworkVersion(
@@ -282,18 +391,24 @@ namespace Aurie
 			allocation.AllocationSize = AllocationSize;
 			allocation.OwnerModule = OwnerModule;
 
+			RtlSecureZeroMemory(allocation.AllocationBase, AllocationSize);
 			return allocation;
 		}
 
 		AurieStatus MmpVerifyCallback(
-			IN HMODULE Module,
+			IN AurieModule* Module,
 			IN PVOID CallbackRoutine
 		)
 		{
-			if (CallbackRoutine && Module)
-				return AURIE_SUCCESS;
+			if (!Module || !CallbackRoutine)
+				return AURIE_ACCESS_DENIED;
 
-			return AURIE_ACCESS_DENIED;
+			const auto callback_address = reinterpret_cast<uintptr_t>(CallbackRoutine);
+			if ((callback_address < Module->ImageBase.Address) ||
+				(callback_address > Module->ImageBase.Address + Module->ImageSize))
+				return AURIE_ACCESS_DENIED;
+
+			return AURIE_SUCCESS;
 		}
 
 		void MmpFreeMemory(
@@ -392,6 +507,14 @@ namespace Aurie
 			return &OwnerModule->InlineHooks.emplace_back(std::move(Hook));
 		}
 
+		AurieRpHook* MmpAddRPInlineHookToTable(
+			IN AurieModule* OwnerModule,
+			IN AurieRpHook&& Hook
+		)
+		{
+			return &OwnerModule->RPInlineHooks.emplace_back(std::move(Hook));
+		}
+
 		AurieMidHook* MmpAddMidHookToTable(
 			IN AurieModule* OwnerModule,
 			IN AurieMidHook&& Hook
@@ -448,6 +571,30 @@ namespace Aurie
 			return AURIE_SUCCESS;
 		}
 
+		AurieStatus MmpRemoveRPHook(
+			IN AurieModule* Module,
+			IN AurieRpHook* Hook, 
+			IN bool RemoveFromTable
+		)
+		{
+			// Do the unhook atomically
+			Internal::MmpFreezeCurrentProcess();
+
+			Hook->HookInstance = {};
+
+			Internal::MmpResumeCurrentProcess();
+
+			if (RemoveFromTable)
+			{
+				MmpRemoveRPHookFromTable(
+					Module,
+					Hook
+				);
+			}
+
+			return AURIE_SUCCESS;
+		}
+
 		AurieStatus MmpRemoveHook(
 			IN AurieModule* Module,
 			IN std::string_view HookIdentifier,
@@ -492,6 +639,136 @@ namespace Aurie
 				);
 			}
 
+			// We know it's not an inline nor midfunction hook, so try searching for a RP hook
+			AurieRpHook* rp_hook_object = nullptr;
+			last_status = MmpLookupRPHookByName(
+				Module,
+				HookIdentifier,
+				rp_hook_object
+			);
+
+			// If we found it, remove it
+			if (AurieSuccess(last_status))
+			{
+				return MmpRemoveRPHook(
+					Module,
+					rp_hook_object,
+					RemoveFromTable
+				);
+			}
+
+			// Else it's a non-existent hook.
+			return AURIE_OBJECT_NOT_FOUND;
+		}
+
+		AurieStatus MmpEnableHook(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier
+		)
+		{
+			AurieInlineHook* inline_hook_object = nullptr;
+			AurieStatus last_status = AURIE_SUCCESS;
+
+			// Try to look it up in the inline hook table
+			last_status = MmpLookupInlineHookByName(
+				Module,
+				HookIdentifier,
+				inline_hook_object
+			);
+
+			// If we found it, we can remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = inline_hook_object->HookInstance.enable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
+			// We know it's not an inline hook, so try searching for a midhook
+			AurieMidHook* mid_hook_object = nullptr;
+			last_status = MmpLookupMidHookByName(
+				Module,
+				HookIdentifier,
+				mid_hook_object
+			);
+
+			// If we found it, remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = mid_hook_object->HookInstance.enable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
+			// We know it's not an inline nor midfunction hook, so try searching for a RP hook
+			AurieRpHook* rp_hook_object = nullptr;
+			last_status = MmpLookupRPHookByName(
+				Module,
+				HookIdentifier,
+				rp_hook_object
+			);
+
+			// If we found it, remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = rp_hook_object->HookInstance.enable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
+			// Else it's a non-existent hook.
+			return AURIE_OBJECT_NOT_FOUND;
+		}
+
+		AurieStatus MmpDisableHook(
+			IN AurieModule* Module, 
+			IN std::string_view HookIdentifier
+		)
+		{
+			AurieInlineHook* inline_hook_object = nullptr;
+			AurieStatus last_status = AURIE_SUCCESS;
+
+			// Try to look it up in the inline hook table
+			last_status = MmpLookupInlineHookByName(
+				Module,
+				HookIdentifier,
+				inline_hook_object
+			);
+
+			// If we found it, we can remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = inline_hook_object->HookInstance.disable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
+			// We know it's not an inline hook, so try searching for a midhook
+			AurieMidHook* mid_hook_object = nullptr;
+			last_status = MmpLookupMidHookByName(
+				Module,
+				HookIdentifier,
+				mid_hook_object
+			);
+
+			// If we found it, remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = mid_hook_object->HookInstance.disable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
+			// We know it's not an inline nor midfunction hook, so try searching for a RP hook
+			AurieRpHook* rp_hook_object = nullptr;
+			last_status = MmpLookupRPHookByName(
+				Module,
+				HookIdentifier,
+				rp_hook_object
+			);
+
+			// If we found it, remove it
+			if (AurieSuccess(last_status))
+			{
+				if (auto error = rp_hook_object->HookInstance.disable(); !error)
+					return AURIE_EXTERNAL_ERROR;
+			}
+
 			// Else it's a non-existent hook.
 			return AURIE_OBJECT_NOT_FOUND;
 		}
@@ -518,6 +795,20 @@ namespace Aurie
 			std::erase_if(
 				Module->MidHooks,
 				[Hook](const AurieMidHook& Entry) -> bool
+				{
+					return Entry == *Hook;
+				}
+			);
+		}
+
+		void MmpRemoveRPHookFromTable(
+			IN AurieModule* Module,
+			IN AurieRpHook* Hook
+		)
+		{
+			std::erase_if(
+				Module->RPInlineHooks,
+				[Hook](const AurieRpHook& Entry) -> bool
 				{
 					return Entry == *Hook;
 				}
@@ -570,6 +861,29 @@ namespace Aurie
 			return AURIE_SUCCESS;
 		}
 
+		AurieStatus MmpLookupRPHookByName(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier,
+			OUT AurieRpHook*& Hook
+		)
+		{
+			auto iterator = std::find_if(
+				Module->RPInlineHooks.begin(),
+				Module->RPInlineHooks.end(),
+				[HookIdentifier](AurieRpHook& Object) -> bool
+				{
+					return Object.Identifier == HookIdentifier;
+				}
+			);
+
+			if (iterator == std::end(Module->RPInlineHooks))
+				return AURIE_OBJECT_NOT_FOUND;
+
+			Hook = &(*iterator);
+
+			return AURIE_SUCCESS;
+		}
+
 		AurieInlineHook* MmpCreateInlineHook(
 			IN AurieModule* Module,
 			IN std::string_view HookIdentifier,
@@ -600,6 +914,23 @@ namespace Aurie
 			hook.HookInstance = safetyhook::create_mid(SourceInstruction, reinterpret_cast<safetyhook::MidHookFn>(TargetFunction));
 
 			return MmpAddMidHookToTable(Module, std::move(hook));
+		}
+
+		AurieRpHook* MmpCreateRpHook(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier, 
+			IN PVOID SourceInstruction, 
+			IN PVOID DestinationFunction
+		)
+		{
+			// Create the hook object
+			AurieRpHook hook = {};
+			hook.Owner = Module;
+			hook.Identifier = HookIdentifier;
+			hook.HookInstance = safetyhook::create_rp(SourceInstruction, DestinationFunction);
+
+			// Add the hook to the table
+			return MmpAddRPInlineHookToTable(Module, std::move(hook));
 		}
 
 		void MmpFreezeCurrentProcess()
@@ -652,6 +983,45 @@ namespace Aurie
 					return false;
 				}
 			);
+		}
+
+		AurieStatus MmpGetRegistersForRPHook(
+			IN AurieRpHook* HookObject,
+			OUT ProcessorContext& Context
+		)
+		{
+			if (!HookObject->HookInstance)
+				return AURIE_ACCESS_DENIED;
+
+			auto& register_context = HookObject->HookInstance.register_state();
+#if _WIN64
+			Context.RAX = register_context.rax;
+			Context.RBX = register_context.rbx;
+			Context.RCX = register_context.rcx;
+			Context.RDX = register_context.rdx;
+			Context.RSI = register_context.rsi;
+			Context.RDI = register_context.rdi;
+			Context.RSP = register_context.rsp;
+			Context.RBP = register_context.rbp;
+			Context.R8 = register_context.r8;
+			Context.R9 = register_context.r9;
+			Context.R10 = register_context.r10;
+			Context.R11 = register_context.r11;
+			Context.R12 = register_context.r12;
+			Context.R13 = register_context.r13;
+			Context.R14 = register_context.r14;
+			Context.R15 = register_context.r15;
+#else
+			Context.EAX = static_cast<uint32_t>(register_context.rax);
+			Context.EBX = static_cast<uint32_t>(register_context.rbx);
+			Context.ECX = static_cast<uint32_t>(register_context.rcx);
+			Context.EDX = static_cast<uint32_t>(register_context.rdx);
+			Context.ESI = static_cast<uint32_t>(register_context.rsi);
+			Context.EDI = static_cast<uint32_t>(register_context.rdi);
+			Context.EBP = static_cast<uint32_t>(register_context.rbp);
+			Context.ESP = static_cast<uint32_t>(register_context.rsp);
+#endif
+			return AURIE_SUCCESS;
 		}
 	}
 }

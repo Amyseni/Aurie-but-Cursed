@@ -9,9 +9,11 @@
 #include "framework/framework.hpp"
 
 // Unload routine, frees everything properly
-void ArProcessDetach(HINSTANCE)
+static void ArProcessDetach(HINSTANCE)
 {
 	using namespace Aurie;
+
+	Beep(1200, 200);
 
 	// Unload all modules except the initial image
 	// First calls the ModuleUnload functions (if they're set up)
@@ -45,11 +47,14 @@ void ArProcessDetach(HINSTANCE)
 	// Null the initial image, and clear the module list
 	g_ArInitialImage = nullptr;
 	Internal::g_LdrModuleList.clear();
+
+	// Destroy the console
+	Internal::DbgpDestroyConsole();
 }
 
 // Called upon framework initialization (DLL_PROCESS_ATTACH) event.
 // This is the first function that runs.
-void ArProcessAttach(HINSTANCE Instance)
+static void ArProcessAttach(HINSTANCE Instance)
 {
 	using namespace Aurie;
 
@@ -96,11 +101,11 @@ void ArProcessAttach(HINSTANCE Instance)
 	);
 
 	// Get the current folder (where the main executable is)
-	fs::path folder_path;
+	fs::path game_folder;
 	if (!AurieSuccess(
 		Internal::MdpGetImageFolder(
-			g_ArInitialImage, 
-			folder_path
+			g_ArInitialImage,
+			game_folder
 		)
 	))
 	{
@@ -112,16 +117,130 @@ void ArProcessAttach(HINSTANCE Instance)
 		);
 	}
 
+	SetCurrentDirectoryW(game_folder.native().c_str());
+
+	// Create a logger
+	Internal::DbgpCreateConsole("Aurie Framework Log | Press Ctrl+C to close");
+	Internal::DbgpInitLogger();
+
+	LPWSTR command_line = GetCommandLineW();
+	if (wcsstr(command_line, L"-aurie_wait_for_debug"))
+	{
+		DbgPrintEx(LOG_SEVERITY_INFO, "[ArProcessAttach] Waiting for debugger...", game_folder.wstring().c_str());
+		while (!IsDebuggerPresent()) {};
+
+		Sleep(500); // Give time for the debugger to initialize
+	}
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Current folder is %S", game_folder.wstring().c_str());
+
+	// Load all native mods
+	// AurieLoader used to do this in the past, but 
+	fs::path native_path = game_folder / "mods" / "native";
+	std::error_code ec;
+	for (const auto& entry : std::filesystem::directory_iterator(native_path, ec))
+	{
+		// If the file isn't a regular file (but instead a directory, symlink, etc.), skip it
+		if (!entry.is_regular_file())
+			continue;
+
+		// If the file has no name (wtf?), skip it
+		if (!entry.path().has_filename())
+			continue;
+		
+		// If the file has no extension, skip it
+		if (!entry.path().filename().has_extension())
+			continue;
+
+		// If the file doesn't end with a .dll extension, skip it.
+		if (entry.path().filename().extension().compare(L".dll"))
+			continue;
+
+		// If the module is already loaded, skip it.
+		if (GetModuleHandleW(entry.path().c_str()))
+			continue;
+
+		HMODULE loaded_library = LoadLibraryW(entry.path().c_str());
+		DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loaded native module \"%S\" at %p", entry.path().c_str(), loaded_library);
+	}
+
+
 	// Craft the path from which the mods will be loaded
-	folder_path = folder_path / "mods" / "aurie";
+	game_folder = game_folder / "mods" / "aurie";
+
+	// Build a list of "priority mods" - these are mods that have a ModuleEntrypoint 
+	// We can't use MdpMapFolder as that doesn't allow us to specify custom conditions
+	std::vector<fs::path> priority_modules;
+	Internal::MdpBuildModuleList(
+		game_folder,
+		true,
+		[](const fs::directory_entry& Entry)
+		{
+			if (!Internal::MdpIsValidModulePredicate(Entry))
+				return false;
+
+			if (!PpFindFileExportByName(Entry, "ModuleEntrypoint"))
+				return false;
+
+			return true;
+		},
+		priority_modules
+	);
+
+	// Sort the priority modules list from A-Z
+	std::sort(
+		priority_modules.begin(),
+		priority_modules.end()
+	);
+
+	Internal::MdpMapModulesFromList(
+		priority_modules
+	);
+
+	// Call ModuleEntrypoint on all loaded plugins
+	for (auto& entry : Internal::g_LdrModuleList)
+	{
+		AurieStatus last_status = AURIE_SUCCESS;
+
+		last_status = Internal::MdpDispatchEntry(
+			&entry,
+			entry.ModuleEntrypoint
+		);
+
+		// Mark mods failed for loading for the purge
+		if (!AurieSuccess(last_status))
+		{
+			std::wstring module_name = L"<unknown>";
+
+			// We don't care about the result - if the function fails, we fall back to the "<unknown>" string.
+			MdGetImageFilename(&entry, module_name);
+
+			DbgPrintEx(
+				LOG_SEVERITY_WARNING,
+				"[ArProcessAttach] Module \"%S\" failed ModuleEntrypoint with status %s and will be purged.",
+				module_name.c_str(),
+				AurieStatusToString(last_status)
+			);
+
+			Internal::MdpMarkModuleForPurge(&entry);
+		}
+		else
+		{
+			entry.Flags.EntrypointRan = true;
+		}
+	}
 
 	// Load everything from %APPDIR%\\mods\\aurie
 	Internal::MdpMapFolder(
-		folder_path,
+		game_folder,
 		true,
 		false,
 		nullptr
 	);
+
+	// Purge all the modules that failed loading
+	// We purge after loading everything else, because doing it the other way around would just re-load the module again.
+	Internal::MdpPurgeMarkedModules();
 
 	// Call ModulePreinitialize on all loaded plugins
 	for (auto& entry : Internal::g_LdrModuleList)
@@ -146,9 +265,25 @@ void ArProcessAttach(HINSTANCE Instance)
 
 		// Mark mods failed for loading for the purge
 		if (!AurieSuccess(last_status))
+		{
+			std::wstring module_name = L"<unknown>";
+
+			// We don't care about the result - if the function fails, we fall back to the "<unknown>" string.
+			MdGetImageFilename(&entry, module_name);
+
+			DbgPrintEx(
+				LOG_SEVERITY_WARNING,
+				"[ArProcessAttach] Module \"%S\" failed ModulePreinitialize with status %s and will be purged.",
+				module_name.c_str(),
+				AurieStatusToString(last_status)
+			);
+
 			Internal::MdpMarkModuleForPurge(&entry);
+		}
 		else
+		{
 			entry.Flags.IsPreloaded = true;
+		}
 	}
 
 	// Purge all the modules that failed loading
@@ -191,19 +326,49 @@ void ArProcessAttach(HINSTANCE Instance)
 
 		// Mark mods failed for loading for the purge
 		if (!AurieSuccess(last_status))
+		{
+			std::wstring module_name = L"<unknown>";
+
+			// We don't care about the result - if the function fails, we fall back to the "<unknown>" string.
+			MdGetImageFilename(&entry, module_name);
+
+			DbgPrintEx(
+				LOG_SEVERITY_WARNING, 
+				"[ArProcessAttach] Module \"%S\" failed ModuleInitialize with status %s and will be purged.",
+				module_name.c_str(),
+				AurieStatusToString(last_status)
+			);
+
 			Internal::MdpMarkModuleForPurge(&entry);
+		}
 		else
+		{
 			entry.Flags.IsInitialized = true;
+		}
 	}
 
 	// Purge all the modules that failed loading
 	// We can't do this in the for loop because of iterators...
 	Internal::MdpPurgeMarkedModules();
 
-	while (!GetAsyncKeyState(VK_END))
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Init done.");
+
+	DWORD state = 0;
+	while (!state)
 	{
+		state = GetAsyncKeyState(VK_END);
 		Sleep(1);
 	}
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] GetAsyncKeyState State: %x", state);
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Unloading now.");
+
+	// Flush all loggers
+	spdlog::apply_all([](std::shared_ptr<spdlog::logger> Logger) { Logger->flush(); });
+
+	// Stop logger thread
+	spdlog::shutdown();
 
 	// Calls DllMain with DLL_PROCESS_DETACH, which calls ArProcessDetach
 	FreeLibraryAndExitThread(Instance, 0);

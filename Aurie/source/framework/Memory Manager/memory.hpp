@@ -51,6 +51,24 @@ namespace Aurie
 		OUT OPTIONAL PVOID* Trampoline
 	);
 
+	EXPORTED AurieStatus MmEnableHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier
+	);
+
+	EXPORTED AurieStatus MmDisableHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier
+	);
+
+	EXPORTED AurieStatus MmCreateUnsafeHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier,
+		IN PVOID SourceFunction,
+		IN PVOID DestinationFunction,
+		OUT OPTIONAL PVOID* Trampoline
+	);
+
 	EXPORTED AurieStatus MmHookExists(
 		IN AurieModule* Module,
 		IN std::string_view HookIdentifier
@@ -73,6 +91,12 @@ namespace Aurie
 		IN AurieMidHookFunction TargetHandler
 	);
 
+	EXPORTED AurieStatus MmGetRegistersForHook(
+		IN AurieModule* Module,
+		IN std::string_view HookIdentifier,
+		OUT ProcessorContext& Context
+	);
+
 	namespace Internal
 	{
 		AurieMemoryAllocation MmpAllocateMemory(
@@ -81,7 +105,7 @@ namespace Aurie
 		);
 
 		AurieStatus MmpVerifyCallback(
-			IN HMODULE Module,
+			IN AurieModule* Module,
 			IN PVOID CallbackRoutine
 		);
 
@@ -118,6 +142,11 @@ namespace Aurie
 			IN AurieInlineHook&& Hook
 		);
 
+		AurieRpHook* MmpAddRPInlineHookToTable(
+			IN AurieModule* OwnerModule,
+			IN AurieRpHook&& Hook
+		);
+
 		AurieMidHook* MmpAddMidHookToTable(
 			IN AurieModule* OwnerModule,
 			IN AurieMidHook&& Hook
@@ -135,10 +164,26 @@ namespace Aurie
 			IN bool RemoveFromTable
 		);
 
+		AurieStatus MmpRemoveRPHook(
+			IN AurieModule* Module,
+			IN AurieRpHook* Hook,
+			IN bool RemoveFromTable
+		);
+
 		AurieStatus MmpRemoveHook(
 			IN AurieModule* Module,
 			IN std::string_view HookIdentifier,
 			IN bool RemoveFromTable
+		);
+
+		AurieStatus MmpEnableHook(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier
+		);
+
+		AurieStatus MmpDisableHook(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier
 		);
 
 		void MmpRemoveInlineHookFromTable(
@@ -151,6 +196,11 @@ namespace Aurie
 			IN AurieMidHook* Hook
 		);
 
+		void MmpRemoveRPHookFromTable(
+			IN AurieModule* Module,
+			IN AurieRpHook* Hook
+		);
+
 		AurieStatus MmpLookupInlineHookByName(
 			IN AurieModule* Module,
 			IN std::string_view HookIdentifier,
@@ -161,6 +211,12 @@ namespace Aurie
 			IN AurieModule* Module,
 			IN std::string_view HookIdentifier,
 			OUT AurieMidHook*& Hook
+		);
+
+		AurieStatus MmpLookupRPHookByName(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier,
+			OUT AurieRpHook*& Hook
 		);
 
 		AurieInlineHook* MmpCreateInlineHook(
@@ -177,9 +233,21 @@ namespace Aurie
 			IN AurieMidHookFunction TargetFunction
 		);
 
+		AurieRpHook* MmpCreateRpHook(
+			IN AurieModule* Module,
+			IN std::string_view HookIdentifier,
+			IN PVOID SourceInstruction,
+			IN PVOID DestinationFunction
+		);
+
 		void MmpFreezeCurrentProcess();
 
 		void MmpResumeCurrentProcess();
+
+		AurieStatus MmpGetRegistersForRPHook(
+			IN AurieRpHook* HookObject,
+			OUT ProcessorContext& Context
+		);
 	}
 }
 
