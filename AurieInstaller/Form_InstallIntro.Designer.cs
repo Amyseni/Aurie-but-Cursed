@@ -28,11 +28,13 @@
         /// </summary>
         private void InitializeComponent()
         {
+            components = new System.ComponentModel.Container();
             bt_PickGame = new Button();
             lb_MainText = new Label();
             label1 = new Label();
             cb_AdvancedMode = new CheckBox();
             cb_InstallAs = new CheckBox();
+            tt_AdvancedModeTemp = new ToolTip(components);
             SuspendLayout();
             // 
             // bt_PickGame
@@ -71,13 +73,14 @@
             cb_AdvancedMode.AutoSize = true;
             cb_AdvancedMode.Checked = true;
             cb_AdvancedMode.CheckState = CheckState.Checked;
-            cb_AdvancedMode.Enabled = false;
             cb_AdvancedMode.Location = new Point(322, 123);
             cb_AdvancedMode.Name = "cb_AdvancedMode";
             cb_AdvancedMode.Size = new Size(141, 25);
             cb_AdvancedMode.TabIndex = 3;
             cb_AdvancedMode.Text = "Advanced mode";
+            tt_AdvancedModeTemp.SetToolTip(cb_AdvancedMode, "Advanced mode is forcibly enabled in this release for compatibility reasons.\r\nThe ability to disable it will be added in a later update.");
             cb_AdvancedMode.UseVisualStyleBackColor = true;
+            cb_AdvancedMode.CheckedChanged += cb_AdvancedMode_CheckedChanged;
             // 
             // cb_InstallAs
             // 
@@ -88,6 +91,10 @@
             cb_InstallAs.TabIndex = 4;
             cb_InstallAs.Text = "Allow C# mods";
             cb_InstallAs.UseVisualStyleBackColor = true;
+            // 
+            // tt_AdvancedModeTemp
+            // 
+            tt_AdvancedModeTemp.ShowAlways = true;
             // 
             // Form_InstallIntro
             // 
@@ -118,5 +125,6 @@
         private Label label1;
         private CheckBox cb_AdvancedMode;
         private CheckBox cb_InstallAs;
+        private ToolTip tt_AdvancedModeTemp;
     }
 }

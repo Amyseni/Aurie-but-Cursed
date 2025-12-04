@@ -115,8 +115,10 @@ namespace AurieInstaller
                     // Versions that we actually want to install.
                     // By default, we use the latest non-beta version.
                     aurie_release = version_picker.ArReleases.First((inst) => !inst.Prerelease);
-                    auriesharp_release = version_picker.AsReleases.FirstOrDefault((inst) => !inst.Prerelease);
-                    yytk_release = version_picker.YkReleases.FirstOrDefault((inst) => !inst.Prerelease);
+                    yytk_release = version_picker.YkReleases.First((inst) => !inst.Prerelease);
+
+                    if (cb_InstallAs.Checked)
+                        auriesharp_release = version_picker.AsReleases.FirstOrDefault((inst) => !inst.Prerelease);
 
                     // Close progress bar, loading is done...
                     progress_bar.pb_Status.Value = 100;
@@ -201,13 +203,16 @@ namespace AurieInstaller
                         "nethost.dll"
                     };
 
-                    // If any of the required files aren't in the AurieSharp release artifacts:
-                    if (auriesharp_required_files.Any(key => !auriesharp_release.Artifacts.ContainsKey(key)))
+                    if (cb_InstallAs.Checked)
                     {
-                        ErrorBox($"AurieSharp {auriesharp_release.VersionTag} does not contain the required files. Please select a different version.");
-                        Enabled = true;
-                        progress_bar.Close();
-                        return;
+                        // If any of the required files aren't in the AurieSharp release artifacts:
+                        if (auriesharp_required_files.Any(key => !auriesharp_release.Artifacts.ContainsKey(key)))
+                        {
+                            ErrorBox($"AurieSharp {auriesharp_release.VersionTag} does not contain the required files. Please select a different version.");
+                            Enabled = true;
+                            progress_bar.Close();
+                            return;
+                        }
                     }
 
                     string mods = Path.Combine(game_directory, "mods");
@@ -242,7 +247,7 @@ namespace AurieInstaller
                         progress_bar.lb_Status.Text = "Downloading AurieSharp Interop...";
                         progress_bar.pb_Status.Value = 60;
                         await NetInstaller.DownloadFileFromUrl(auriesharp_release.Artifacts["auriesharpinterop.dll"], Path.Combine(mods_aurie, "auriesharpinterop.dll"));
-                        
+
                         progress_bar.pb_Status.Value = 65;
                         await NetInstaller.DownloadFileFromUrl(auriesharp_release.Artifacts["auriesharpinterop.runtimeconfig.json"], Path.Combine(mods_aurie, "auriesharpinterop.runtimeconfig.json"));
 
@@ -263,6 +268,8 @@ namespace AurieInstaller
                     progress_bar.pb_Status.Value = 95;
 
                     int exit_status = await PatchGame(game_executable, auriecore_dll, auriepatcher_exe);
+                    progress_bar.Close();
+
                     if (exit_status == 0)
                     {
                         MessageBox.Show("Game patched successfully.", "Aurie Installer", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -271,11 +278,15 @@ namespace AurieInstaller
                     {
                         MessageBox.Show($"Failed to patch the game. Aurie Patcher exited with status {exit_status}.", "Aurie Installer", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
-
-                    progress_bar.Close();
                 }
             }
             Enabled = true;
+        }
+
+        private void cb_AdvancedMode_CheckedChanged(object sender, EventArgs e)
+        {
+            CheckBox obj = (CheckBox)(sender);
+            obj.Checked = true;
         }
     }
 }
