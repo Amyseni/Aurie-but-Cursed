@@ -158,14 +158,15 @@ namespace Aurie
 				TASKDIALOGCONFIG config = { 0 };
 				const TASKDIALOG_BUTTON buttons[] = {
 					{ IDYES, L"Close application" },
-					{ IDNO, L"Close log window" }
+					{ IDNO, L"Close log window" },
+					{ IDABORT, L"Unload framework" }
 				};
 				config.cbSize = sizeof(config);
 				config.pszWindowTitle = L"Aurie Framework";
 				config.hInstance = NULL;
 				config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
 				config.pszMainIcon = TD_INFORMATION_ICON;
-				config.pszMainInstruction = L"Framework console closed";
+				config.pszMainInstruction = L"Action requested";
 				config.pszContent =
 					L"You've attempted to close the Aurie console window.\n"
 					L"It isn't possible to re-open it without restarting the game.\n"
@@ -185,6 +186,11 @@ namespace Aurie
 					// Close log window button
 					DbgPrintEx(LOG_SEVERITY_INFO, "Log window is closing due to CTRL+C event.");
 					DbgpDestroyConsole();
+					return TRUE;
+				case IDABORT:
+					DbgPrintEx(LOG_SEVERITY_INFO, "Unloading due to CTRL+C event.");
+					DbgpDestroyConsole();
+					g_RequestedUnload = true;
 					return TRUE;
 				default:
 					// Maybe cancel? idfk

@@ -52,6 +52,8 @@ namespace Aurie
 		);
 
 		EXPORTED void DbgpDestroyConsole();
+
+		inline bool g_RequestedUnload = false;
 	}
 }
 

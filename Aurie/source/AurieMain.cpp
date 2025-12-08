@@ -353,16 +353,9 @@ static void ArProcessAttach(HINSTANCE Instance)
 
 	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Init done.");
 
-	DWORD state = 0;
-	while (!state)
-	{
-		state = GetAsyncKeyState(VK_END);
-		Sleep(1);
-	}
-
-	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] GetAsyncKeyState State: %x", state);
-
-	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Unloading now.");
+	// Spin infinitely until an unload is requested (if ever).
+	while (!Internal::g_RequestedUnload)
+		Sleep(10);
 
 	// Flush all loggers
 	spdlog::apply_all([](std::shared_ptr<spdlog::logger> Logger) { Logger->flush(); });
