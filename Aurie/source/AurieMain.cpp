@@ -269,6 +269,10 @@ static void ArProcessAttach(HINSTANCE Instance)
 
 	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loading mods with ModulePreinitialize...");
 
+	Internal::MdpMapModulesFromList(
+		priority_modules
+	);
+
 	// Call ModulePreinitialize on all loaded plugins
 	for (auto& entry : Internal::g_LdrModuleList)
 	{
