@@ -123,6 +123,8 @@ static void ArProcessAttach(HINSTANCE Instance)
 	Internal::DbgpCreateConsole("Aurie Framework Log | Press Ctrl+C to close");
 	Internal::DbgpInitLogger();
 
+	DbgPrintEx(LOG_SEVERITY_TRACE, "Aurie Core v%d.%d.%d loaded at %p", AURIE_FWK_MAJOR, AURIE_FWK_MINOR, AURIE_FWK_PATCH, Instance);
+
 	LPWSTR command_line = GetCommandLineW();
 	if (wcsstr(command_line, L"-aurie_wait_for_debug"))
 	{
@@ -164,9 +166,13 @@ static void ArProcessAttach(HINSTANCE Instance)
 		DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loaded native module \"%S\" at %p", entry.path().c_str(), loaded_library);
 	}
 
-
 	// Craft the path from which the mods will be loaded
 	game_folder = game_folder / "mods" / "aurie";
+
+	if (!Internal::g_LdrpCallInitRoutine)
+	{
+		DbgPrintEx(LOG_SEVERITY_ERROR, "Failed to find ntdll!LdrpCallInitRoutine. Modules that call Aurie functions from CRT init may not load.");
+	}
 
 	// Build a list of "priority mods" - these are mods that have a ModuleEntrypoint 
 	// We can't use MdpMapFolder as that doesn't allow us to specify custom conditions
@@ -196,6 +202,8 @@ static void ArProcessAttach(HINSTANCE Instance)
 	Internal::MdpMapModulesFromList(
 		priority_modules
 	);
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loading mods with ModuleEntrypoint...");
 
 	// Call ModuleEntrypoint on all loaded plugins
 	for (auto& entry : Internal::g_LdrModuleList)
@@ -230,17 +238,36 @@ static void ArProcessAttach(HINSTANCE Instance)
 		}
 	}
 
-	// Load everything from %APPDIR%\\mods\\aurie
-	Internal::MdpMapFolder(
-		game_folder,
-		true,
-		false,
-		nullptr
-	);
-
 	// Purge all the modules that failed loading
 	// We purge after loading everything else, because doing it the other way around would just re-load the module again.
 	Internal::MdpPurgeMarkedModules();
+
+	// Build a list of mods that have a ModulePreinitialize.
+	// We reuse the priority_modules vector.
+	// MdpBuildModuleList clears it on entry, so we don't worry about mod duplicates.
+	Internal::MdpBuildModuleList(
+		game_folder,
+		true,
+		[](const fs::directory_entry& Entry)
+		{
+			if (!Internal::MdpIsValidModulePredicate(Entry))
+				return false;
+
+			if (!PpFindFileExportByName(Entry, "ModulePreinitialize"))
+				return false;
+
+			return true;
+		},
+		priority_modules
+	);
+
+	// Sort the priority modules list from A-Z
+	std::sort(
+		priority_modules.begin(),
+		priority_modules.end()
+	);
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loading mods with ModulePreinitialize...");
 
 	// Call ModulePreinitialize on all loaded plugins
 	for (auto& entry : Internal::g_LdrModuleList)
@@ -297,7 +324,7 @@ static void ArProcessAttach(HINSTANCE Instance)
 		Internal::ElpResumeProcess(GetCurrentProcess());
 	}
 
-	// Now we have to wait until the current process has finished initializating
+	// Now we have to wait until the current process has finished initializating...
 	
 	// Query the process subsystem
 	unsigned short current_process_subsystem = 0;
@@ -311,6 +338,16 @@ static void ArProcessAttach(HINSTANCE Instance)
 		ElWaitForCurrentProcessWindow();
 
 	WaitForInputIdle(GetCurrentProcess(), INFINITE);
+
+	DbgPrintEx(LOG_SEVERITY_TRACE, "[ArProcessAttach] Loading all remaining mods...");
+
+	// Load everything from %APPDIR%\\mods\\aurie
+	Internal::MdpMapFolder(
+		game_folder,
+		true,
+		false,
+		nullptr
+	);
 
 	// Call ModuleEntry on all loaded plugins
 	for (auto& entry : Internal::g_LdrModuleList)
@@ -379,6 +416,9 @@ BOOL WINAPI DllMain(
 	case DLL_PROCESS_ATTACH:
 		{
 			DisableThreadLibraryCalls(hinstDLL);
+
+			// Try to locate LdrpCallInitRoutine, to fix stupid mods trying to call Aurie from CRT initializers.
+			Aurie::Internal::MdpSetupLdrpCallInitRoutinePointer();
 
 			HANDLE created_thread = CreateThread(
 				nullptr,

@@ -156,6 +156,20 @@ namespace Aurie
 			IN const fs::directory_entry& Entry
 		);
 
+		// Hook for ntdll!LdrpCallInitRoutine.
+		// Makes sure __AurieFrameworkInit runs before DllMainCRTStartup.
+		BOOLEAN NTAPI MdpCallInitRoutineReplacementFunction(
+			IN PVOID EntryPoint,
+			IN PVOID BaseAddress,
+			IN ULONG Reason,
+			IN PVOID Context
+		);
+
+		// Must be called as a descendant of a DllMain call.
+		// Traces stack up until first frame in ntdll.dll, which will be the function.
+		bool MdpSetupLdrpCallInitRoutinePointer();
+
+		inline PVOID g_LdrpCallInitRoutine = nullptr;
 		inline std::list<AurieModule> g_LdrModuleList;
 	}
 }

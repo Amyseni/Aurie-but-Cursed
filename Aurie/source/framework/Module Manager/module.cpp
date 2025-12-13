@@ -1,5 +1,6 @@
 #include "module.hpp"
 #include <Psapi.h>
+#include <Zydis/Zydis.h>
 
 namespace Aurie
 {
@@ -150,8 +151,34 @@ namespace Aurie
 		if (AurieSuccess(last_status))
 			return AURIE_OBJECT_ALREADY_EXISTS;
 
+		if (g_LdrpCallInitRoutine)
+		{
+			last_status = MmCreateUnsafeHook(
+				g_ArInitialImage, 
+				"LdrpCallInitRoutine",
+				g_LdrpCallInitRoutine,
+				MdpCallInitRoutineReplacementFunction,
+				nullptr
+			);
+
+			if (!AurieSuccess(last_status))
+			{
+				DbgPrintEx(LOG_SEVERITY_WARNING, "Failed to create hook on LdrpCallInitRoutine.");
+			}
+		}
+
 		// Load the image into memory and make sure we loaded it
 		HMODULE image_module = LoadLibraryW(ImagePath.wstring().c_str());
+
+		if (g_LdrpCallInitRoutine)
+		{
+			last_status = MmRemoveHook(g_ArInitialImage, "LdrpCallInitRoutine");
+
+			if (!AurieSuccess(last_status))
+			{
+				DbgPrintEx(LOG_SEVERITY_WARNING, "Failed to remove hook on LdrpCallInitRoutine.");
+			}
+		}
 
 		if (!image_module)
 			return AURIE_EXTERNAL_ERROR;
@@ -594,6 +621,128 @@ namespace Aurie
 			return false;
 
 		return true;
+	}
+
+	BOOLEAN NTAPI Internal::MdpCallInitRoutineReplacementFunction(
+		IN PVOID EntryPoint,
+		IN PVOID BaseAddress,
+		IN ULONG Reason,
+		IN PVOID Context
+	)
+	{
+		// The AurieModule object hasn't yet been created by the point we get here.
+		// We need to check if the __AurieFrameworkInit function exists, and if it does, call it
+		// in order to initialize the module before its CRT init tries to create eg. static variables which may require Aurie.
+
+		using PFN_LdrpCallInitRoutine = decltype(&MdpCallInitRoutineReplacementFunction);
+
+		if (Reason == DLL_PROCESS_ATTACH)
+		{
+			// Check if the module has an AurieFrameworkInit function.
+			auto fwk_init = reinterpret_cast<AurieLoaderEntry>(GetProcAddress(static_cast<HMODULE>(BaseAddress), "__AurieFrameworkInit"));
+
+			// Initialize the basic state of the module if the framework init function exists.
+			if (fwk_init)
+				fwk_init(g_ArInitialImage, PpGetFrameworkRoutine, nullptr, {}, nullptr);
+		}
+
+		// Call the original function.
+		return static_cast<PFN_LdrpCallInitRoutine>(MmGetHookTrampoline(g_ArInitialImage, "LdrpCallInitRoutine"))(
+			EntryPoint,
+			BaseAddress,
+			Reason,
+			Context
+		);
+	}
+
+	bool Internal::MdpSetupLdrpCallInitRoutinePointer()
+	{
+		const HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+
+		uint64_t ntdll_text_base = 0; size_t ntdll_text_size = 0;
+
+		// If we can't find the bounds of ntdll's .text section, we can't determine if a pointer is inside it.
+		if (!AurieSuccess(PpiGetModuleSectionBounds(ntdll, ".text", ntdll_text_base, ntdll_text_size)))
+			return false;
+
+		// PpiGetModuleSectionBounds gives the RVA of the section as the beginning, so add the base to it.
+		ntdll_text_base += std::bit_cast<uint64_t>(ntdll);
+
+		PVOID backtrace_array[64] = { 0 };
+		WORD captured_frames = RtlCaptureStackBackTrace(0, 64, &backtrace_array[0], nullptr);
+
+		// Definitely not YYTK v5 code
+		auto DisassembleInstructionsByRange = [](uint64_t Base, size_t Size) -> std::vector<ZydisDisassembledInstruction>
+			{
+				const uint16_t image_arch = (sizeof(PVOID) == sizeof(uint64_t)) ? IMAGE_FILE_MACHINE_AMD64 : IMAGE_FILE_MACHINE_I386;
+
+				std::vector<ZydisDisassembledInstruction> instructions;
+
+				// Disassemble each instruction in the range.
+				ZyanU64 current_address = static_cast<ZyanU64>(Base);
+				while (current_address < (static_cast<ZyanU64>(Base) + Size))
+				{
+					ZydisDisassembledInstruction disassembled_instruction;
+					ZyanStatus status = ZydisDisassembleIntel(
+						image_arch == IMAGE_FILE_MACHINE_AMD64 ? ZYDIS_MACHINE_MODE_LONG_64 : ZYDIS_MACHINE_MODE_LEGACY_32,
+						current_address,
+						reinterpret_cast<PVOID>(current_address),
+						ZYDIS_MAX_INSTRUCTION_LENGTH,
+						&disassembled_instruction
+					);
+
+					// If the disassembly fails, advance one byte and try again.
+					if (!ZYAN_SUCCESS(status))
+					{
+						current_address++;
+						continue;
+					}
+
+					// Otherwise continue to the next instruction in line.
+					current_address += disassembled_instruction.info.length;
+					instructions.push_back(disassembled_instruction);
+				}
+
+				return instructions;
+			};
+
+		for (WORD i = 0; i < captured_frames; i++)
+		{
+			uintptr_t entry_address = std::bit_cast<uintptr_t>(backtrace_array[i]);
+
+			if (entry_address < ntdll_text_base || entry_address > ntdll_text_base + ntdll_text_size)
+				continue;
+
+			// First address is inside LdrpInitRoutine.
+			// We must now go up a little, and find the start of the function.
+			// All functions have some 0xCC padding above them.
+			// The trick is therefore to disassemble all the opcodes, find the last INT3, 
+			// and find the instruction after - that marks the function start.
+
+			// Go up a little.
+			entry_address -= 0x100;
+
+			// Disassemble all instructions in the range using code that's DEFINITELY NOT from YYTK v5.
+			auto disasm_result = DisassembleInstructionsByRange(entry_address, 0x100);
+
+			// Find the last INT3
+			const ZydisDisassembledInstruction* target_instruction = nullptr;
+			for (const auto& instr : disasm_result)
+				if (instr.info.mnemonic == ZYDIS_MNEMONIC_INT3)
+					target_instruction = &instr;
+
+			// There has to be one, or else something is wrong?
+			if (!target_instruction)
+				return false;
+
+			// ... and finally the instruction after, since a std::vector is contiguous in memory.
+			target_instruction++;
+
+			g_LdrpCallInitRoutine = reinterpret_cast<PVOID>(target_instruction->runtime_address);
+			return true;
+		}
+
+		return false;
 	}
 
 	AurieStatus MdMapImage(
