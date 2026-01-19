@@ -3,7 +3,7 @@ Native x86 and x64 modding framework supporting Windows ~~8.1~~ 10 x86_32 → Wi
 
 Aurie Framework but Cursed allows the following:
 - Runtime module ~~loading~~ (WIP) / unloading (by force)
-- Some extra constant/static init to make one single extra type to be staticaly init.
+- Some extra constant/static init to make one single extra type available at static time.
 - Module operability (rarely)
 - Hooks using ~~SafetyHook~~ Arkitekt, so good luck compiling.
 - ~~Automatic~~ No memory management
