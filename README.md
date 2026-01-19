@@ -1,5 +1,5 @@
 # Aurie Framework but Cursed
-Native x86 and x64 modding framework supporting Windows ~~8.1~~ 10 x86_32 → Windows 10 x86_32~~64~~ ~~11~~. (and Fedora 43 w/ KDE Plasma, but only on Proton Experimental)
+Native x86 and x64 modding framework supporting Windows ~~8.1~~ 10 x86_32 → Windows ~~11~~ 10 x86_~~64~~ 32. (and Fedora 43 w/ KDE Plasma, but only on Proton Experimental)
 
 Aurie Framework but Cursed allows the following:
 - Runtime module ~~loading~~ (WIP) / unloading (by force)
